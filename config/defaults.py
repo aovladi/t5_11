@@ -22,14 +22,14 @@ class train_config:
     # google/t5-v1_1-xxl #11b
 
     # save models
-    save_model: bool = True
+    save_model: bool = False
     save_folder = "training_checkpoints"
     checkpoint_max_save_count: int = (
         2  # number of 'best' checkpoints to save based on val loss
     )
 
     # sharding policy
-    sharding_strategy: ShardingStrategy = ShardingStrategy.FULL_SHARD
+    sharding_strategy: ShardingStrategy = ShardingStrategy.NO_SHARD
     print_sharding_plan: bool = False
 
     # dataloaders
@@ -37,11 +37,11 @@ class train_config:
 
     # policies
     fsdp_unit_size = 1000000
-    use_mixed_precision: bool = True
+    use_mixed_precision: bool = False
 
     # activation checkpointing
     hf_activation_checkpointing: bool = False
-    fsdp_activation_checkpointing: bool = True
+    fsdp_activation_checkpointing: bool = False
 
     # datasets
     dataset_train = "datasets_grammar/grammar_train.csv"
@@ -49,7 +49,7 @@ class train_config:
 
     # training
     batch_size: int = 5
-    num_epochs: int = 1
+    num_epochs: int = 90
 
     # validation
     run_validation: bool = True
@@ -63,7 +63,7 @@ class train_config:
     distributed_debug: bool = True
 
     # Fine Tuning
-    use_child_tuning: bool = True
+    use_child_tuning: bool = False
     use_mirror_optimizer = False
     lr: float = 4e-8
 

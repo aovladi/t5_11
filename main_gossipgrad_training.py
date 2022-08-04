@@ -71,6 +71,7 @@ from collections import deque
 
 from madgrad import MirrorMADGRAD as mirror
 
+from torchdistx.gossip_grad import GossipGraDState, Topology, gossip_grad_hook
 # some globals
 g_gigabyte = 1024**3
 
@@ -361,6 +362,7 @@ def fsdp_main(args):
 
     torch.cuda.set_device(local_rank)
     clear_gpu_cache(local_rank)
+    print(torch.distributed.get_rank())
 
     if cfg.hf_activation_checkpointing and not cfg.fsdp_activation_checkpointing:
         model.gradient_checkpointing_enable()
@@ -381,6 +383,18 @@ def fsdp_main(args):
         sharding_strategy=model_sharding_strategy,
         device_id=torch.cuda.current_device(),  # streaming init
     )
+    local_process_group, _ = dist.new_subgroups(group_size=1)
+    num_nodes = torch.cuda.device_count()
+    master_ranks = list(range(num_nodes))
+    master_process_group = dist.new_group(ranks=master_ranks)
+    gossipgrad_state = GossipGraDState(
+        topology=Topology.DISSEMINATION,
+        local_process_group=local_process_group,
+        num_nodes=num_nodes,
+        master_process_group=master_process_group,
+        proc_per_node=1,
+    )
+    model.register_comm_hook(gossipgrad_state, gossip_grad_hook)
 
     # fsdp must do the checkpointing after sharding...
 
@@ -436,7 +450,7 @@ def fsdp_main(args):
         if rank == 0:
             print(f"--> AdamW whole model tuning with ")
 
-    #scheduler = StepLR(optimizer, step_size=1, gamma=gamma)
+    #scheduler = StepLR(slowmo_optim, step_size=1, gamma=gamma)
     epochs = cfg.num_epochs
     if rank == 0:
         print(f"Training for {epochs} epochs")
@@ -462,7 +476,7 @@ def fsdp_main(args):
     #    ],
     #    schedule=torch.profiler.schedule(wait=1, warmup=2, active=3, repeat=1),
     #    on_trace_ready=torch.profiler.tensorboard_trace_handler(
-    #        "fsdp_v100/profile_traces/baseline"
+    #        "fsdp_a100/profile_traces/rebased_pr_no_sync"
     #    ),
     #    profile_memory=True,
     #    with_stack=False,
@@ -495,7 +509,7 @@ def fsdp_main(args):
         if cfg.run_validation:
             curr_val_loss = validation(model, local_rank, rank, world_size, test_loader)
 
-            #scheduler.step()
+        #scheduler.step()
 
         if rank == 0:
             print(f"--> epoch {epoch} completed...entering save and stats zone")
@@ -515,8 +529,9 @@ def fsdp_main(args):
                 )
 
         if cfg.save_model and curr_val_loss < best_val_loss:
-            # update curr best val accuracy
-            # save
+                # update curr best val accuracy
+
+                # save
             if rank == 0:
                 print(f"--> entering save model state...")
             save_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
@@ -524,7 +539,7 @@ def fsdp_main(args):
                 model, StateDictType.FULL_STATE_DICT, save_policy
             ):
                 cpu_state = model.state_dict()
-            # states = model.state_dict()
+                # states = model.state_dict()
             print(f"saving process: rank {rank}  done w state_dict")
 
             if rank == 0:
@@ -548,6 +563,8 @@ def fsdp_main(args):
 
             best_val_loss = curr_val_loss
             print(f"-->>>> New Val Loss Record: {best_val_loss}")
+
+
 
     # init_end_event.record()
     if rank == 0:

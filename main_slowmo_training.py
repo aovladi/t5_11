@@ -71,6 +71,8 @@ from collections import deque
 
 from madgrad import MirrorMADGRAD as mirror
 
+from torchdistx.slowmo import slowmo_comm, slowmo_optimizer
+
 # some globals
 g_gigabyte = 1024**3
 
@@ -381,6 +383,8 @@ def fsdp_main(args):
         sharding_strategy=model_sharding_strategy,
         device_id=torch.cuda.current_device(),  # streaming init
     )
+    slowmo_state = slowmo_comm.SlowMoState(subgroup=None, sync_grads=True)
+    model.register_comm_hook(slowmo_state, slowmo_comm.slowmo_hook)
 
     # fsdp must do the checkpointing after sharding...
 
@@ -436,7 +440,13 @@ def fsdp_main(args):
         if rank == 0:
             print(f"--> AdamW whole model tuning with ")
 
-    #scheduler = StepLR(optimizer, step_size=1, gamma=gamma)
+    slowmo_optim = slowmo_optimizer.SlowMomentumOptimizer(
+        base_optim=optimizer,
+        slowmo_freq=48,
+        slowmo_factor = 0.1,
+        slowmo_lr=1.0
+    )
+    #scheduler = StepLR(slowmo_optim, step_size=1, gamma=gamma)
     epochs = cfg.num_epochs
     if rank == 0:
         print(f"Training for {epochs} epochs")
@@ -455,20 +465,20 @@ def fsdp_main(args):
         training_start_time = time.time()
 
     torch_profiler = None
-    #with torch.profiler.profile(
-    #    activities=[
-    #        torch.profiler.ProfilerActivity.CPU,
-    #        torch.profiler.ProfilerActivity.CUDA,
-    #    ],
-    #    schedule=torch.profiler.schedule(wait=1, warmup=2, active=3, repeat=1),
-    #    on_trace_ready=torch.profiler.tensorboard_trace_handler(
-    #        "fsdp_v100/profile_traces/baseline"
-    #    ),
-    #    profile_memory=True,
-    #    with_stack=False,
-    #    record_shapes=True,
-    #) as torch_profiler:
-
+    """with torch.profiler.profile(
+        activities=[
+            torch.profiler.ProfilerActivity.CPU,
+            torch.profiler.ProfilerActivity.CUDA,
+        ],
+        schedule=torch.profiler.schedule(wait=1, warmup=2, active=3, repeat=1),
+        on_trace_ready=torch.profiler.tensorboard_trace_handler(
+            "fsdp_v100/profile_traces"
+        ),
+        profile_memory=True,
+        with_stack=False,
+        record_shapes=True,
+    ) as torch_profiler:
+    """
     if rank == 0 and cfg.track_memory:
         fn = cfg.model_name + "memory_tracking.txt"
         mem_alloc_tracker = []
@@ -486,7 +496,7 @@ def fsdp_main(args):
             rank,
             world_size,
             train_loader,
-            optimizer,
+            slowmo_optim,#optimizer,
             epoch,
             sampler=sampler1,
             profiler=torch_profiler,
@@ -495,7 +505,7 @@ def fsdp_main(args):
         if cfg.run_validation:
             curr_val_loss = validation(model, local_rank, rank, world_size, test_loader)
 
-            #scheduler.step()
+        #scheduler.step()
 
         if rank == 0:
             print(f"--> epoch {epoch} completed...entering save and stats zone")
@@ -516,6 +526,7 @@ def fsdp_main(args):
 
         if cfg.save_model and curr_val_loss < best_val_loss:
             # update curr best val accuracy
+
             # save
             if rank == 0:
                 print(f"--> entering save model state...")
