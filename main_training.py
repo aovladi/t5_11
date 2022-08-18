@@ -455,99 +455,99 @@ def fsdp_main(args):
         training_start_time = time.time()
 
     torch_profiler = None
-    #with torch.profiler.profile(
-    #    activities=[
-    #        torch.profiler.ProfilerActivity.CPU,
-    #        torch.profiler.ProfilerActivity.CUDA,
-    #    ],
-    #    schedule=torch.profiler.schedule(wait=1, warmup=2, active=3, repeat=1),
-    #    on_trace_ready=torch.profiler.tensorboard_trace_handler(
-    #        "fsdp_v100/profile_traces/baseline"
-    #    ),
-    #    profile_memory=True,
-    #    with_stack=False,
-    #    record_shapes=True,
-    #) as torch_profiler:
+    with torch.profiler.profile(
+        activities=[
+            torch.profiler.ProfilerActivity.CPU,
+            torch.profiler.ProfilerActivity.CUDA,
+        ],
+        schedule=torch.profiler.schedule(wait=1, warmup=2, active=5, repeat=1),
+        on_trace_ready=torch.profiler.tensorboard_trace_handler(
+            "fsdp_a100/for_presentation/profile_traces/main_baseline"
+       ),
+        profile_memory=True,
+        with_stack=False,
+        record_shapes=True,
+    ) as torch_profiler:
 
-    if rank == 0 and cfg.track_memory:
-        fn = cfg.model_name + "memory_tracking.txt"
-        mem_alloc_tracker = []
-        mem_reserved_tracker = []
+        if rank == 0 and cfg.track_memory:
+            fn = cfg.model_name + "memory_tracking.txt"
+            mem_alloc_tracker = []
+            mem_reserved_tracker = []
 
-    for epoch in range(1, epochs + 1):
-        if rank == 0:
-            print(f"\n--> Starting Epoch {epoch}")
+        for epoch in range(1, epochs + 1):
+            if rank == 0:
+                print(f"\n--> Starting Epoch {epoch}")
 
-            t0 = time.time()
-        train_accuracy = train(
-            args,
-            model,
-            local_rank,
-            rank,
-            world_size,
-            train_loader,
-            optimizer,
-            epoch,
-            sampler=sampler1,
-            profiler=torch_profiler,
-        )
-
-        if cfg.run_validation:
-            curr_val_loss = validation(model, local_rank, rank, world_size, test_loader)
-
-            #scheduler.step()
-
-        if rank == 0:
-            print(f"--> epoch {epoch} completed...entering save and stats zone")
-
-            dur.append(time.time() - t0)
-            train_acc_tracking.append(train_accuracy.item())
+                t0 = time.time()
+            train_accuracy = train(
+                args,
+                model,
+                local_rank,
+                rank,
+                world_size,
+                train_loader,
+                optimizer,
+                epoch,
+                sampler=sampler1,
+                profiler=torch_profiler,
+            )
 
             if cfg.run_validation:
-                val_acc_tracking.append(curr_val_loss.item())
+                curr_val_loss = validation(model, local_rank, rank, world_size, test_loader)
 
-            if cfg.track_memory:
-                mem_alloc_tracker.append(
-                    format_metrics_to_gb(torch.cuda.memory_allocated())
-                )
-                mem_reserved_tracker.append(
-                    format_metrics_to_gb(torch.cuda.memory_reserved())
-                )
-
-        if cfg.save_model and curr_val_loss < best_val_loss:
-            # update curr best val accuracy
-            # save
-            if rank == 0:
-                print(f"--> entering save model state...")
-            save_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
-            with FSDP.state_dict_type(
-                model, StateDictType.FULL_STATE_DICT, save_policy
-            ):
-                cpu_state = model.state_dict()
-            # states = model.state_dict()
-            print(f"saving process: rank {rank}  done w state_dict")
+                #scheduler.step()
 
             if rank == 0:
-                print(f"--> saving model ...")
-                currEpoch = (
-                    "-" + str(epoch) + "-" + str(round(curr_val_loss.item(), 4)) + ".pt"
-                )
-                save_name = file_save_name + "-" + time_of_run + "-" + currEpoch
+                print(f"--> epoch {epoch} completed...entering save and stats zone")
 
-                torch.save(cpu_state, save_name)
+                dur.append(time.time() - t0)
+                train_acc_tracking.append(train_accuracy.item())
 
-                print(f"--> saved {save_name} to disk")
+                if cfg.run_validation:
+                    val_acc_tracking.append(curr_val_loss.item())
 
-                dq.append(save_name)
+                if cfg.track_memory:
+                    mem_alloc_tracker.append(
+                        format_metrics_to_gb(torch.cuda.memory_allocated())
+                    )
+                    mem_reserved_tracker.append(
+                        format_metrics_to_gb(torch.cuda.memory_reserved())
+                    )
 
-                # only keep a rolling number of model files to avoid excessive disk space use
-                model_checkpoints.prune_checkpoints(rank, dq, cfg)
+            if cfg.save_model and curr_val_loss < best_val_loss:
+                # update curr best val accuracy
+                # save
+                if rank == 0:
+                    print(f"--> entering save model state...")
+                save_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
+                with FSDP.state_dict_type(
+                    model, StateDictType.FULL_STATE_DICT, save_policy
+                ):
+                    cpu_state = model.state_dict()
+                # states = model.state_dict()
+                print(f"saving process: rank {rank}  done w state_dict")
 
-        # announce new val loss record:
-        if rank == 0 and curr_val_loss < best_val_loss:
+                if rank == 0:
+                    print(f"--> saving model ...")
+                    currEpoch = (
+                        "-" + str(epoch) + "-" + str(round(curr_val_loss.item(), 4)) + ".pt"
+                    )
+                    save_name = file_save_name + "-" + time_of_run + "-" + currEpoch
 
-            best_val_loss = curr_val_loss
-            print(f"-->>>> New Val Loss Record: {best_val_loss}")
+                    torch.save(cpu_state, save_name)
+
+                    print(f"--> saved {save_name} to disk")
+
+                    dq.append(save_name)
+
+                    # only keep a rolling number of model files to avoid excessive disk space use
+                    model_checkpoints.prune_checkpoints(rank, dq, cfg)
+
+            # announce new val loss record:
+            if rank == 0 and curr_val_loss < best_val_loss:
+
+                best_val_loss = curr_val_loss
+                print(f"-->>>> New Val Loss Record: {best_val_loss}")
 
     # init_end_event.record()
     if rank == 0:

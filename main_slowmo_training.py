@@ -371,7 +371,7 @@ def fsdp_main(args):
 
     # --- sharding policy
     model_sharding_strategy = (
-        cfg.sharding_strategy or ShardingStrategy.FULL_SHARD
+        cfg.sharding_strategy or ShardingStrategy.NO_SHARD
     )  # use config, but default to normal if not available
     if rank == 0:
         print(f"Sharding strategy = {model_sharding_strategy}")
@@ -442,8 +442,8 @@ def fsdp_main(args):
 
     slowmo_optim = slowmo_optimizer.SlowMomentumOptimizer(
         base_optim=optimizer,
-        slowmo_freq=48,
-        slowmo_factor = 0.1,
+        slowmo_freq=48,#16,
+        slowmo_factor = 0.1,#0.8,
         slowmo_lr=1.0
     )
     #scheduler = StepLR(slowmo_optim, step_size=1, gamma=gamma)

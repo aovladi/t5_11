@@ -71,7 +71,7 @@ from collections import deque
 
 from madgrad import MirrorMADGRAD as mirror
 
-from torchdistx.gossip_grad import GossipGraDState, Topology, gossip_grad_hook
+from torchdistx.gossip_grad import GossipGraDState, Topology, gossip_grad_hook, get_num_modules
 # some globals
 g_gigabyte = 1024**3
 
@@ -362,7 +362,7 @@ def fsdp_main(args):
 
     torch.cuda.set_device(local_rank)
     clear_gpu_cache(local_rank)
-    print(torch.distributed.get_rank())
+    #print(torch.distributed.get_rank())
 
     if cfg.hf_activation_checkpointing and not cfg.fsdp_activation_checkpointing:
         model.gradient_checkpointing_enable()
@@ -383,16 +383,17 @@ def fsdp_main(args):
         sharding_strategy=model_sharding_strategy,
         device_id=torch.cuda.current_device(),  # streaming init
     )
-    local_process_group, _ = dist.new_subgroups(group_size=1)
-    num_nodes = torch.cuda.device_count()
-    master_ranks = list(range(num_nodes))
-    master_process_group = dist.new_group(ranks=master_ranks)
+    #local_process_group, _ = dist.new_subgroups(group_size=1)
+    #num_nodes = world_size
+    #master_ranks = list(range(num_nodes))
+    #master_process_group = dist.new_group(ranks=master_ranks)
     gossipgrad_state = GossipGraDState(
-        topology=Topology.DISSEMINATION,
-        local_process_group=local_process_group,
-        num_nodes=num_nodes,
-        master_process_group=master_process_group,
-        proc_per_node=1,
+        num_modules=get_num_modules(model),
+        topology=Topology.CUBE,
+        #local_process_group=local_process_group,
+        #num_nodes=num_nodes,
+        #master_process_group=master_process_group,
+        #proc_per_node=1,
     )
     model.register_comm_hook(gossipgrad_state, gossip_grad_hook)
 
@@ -469,101 +470,100 @@ def fsdp_main(args):
         training_start_time = time.time()
 
     torch_profiler = None
-    #with torch.profiler.profile(
-    #    activities=[
-    #        torch.profiler.ProfilerActivity.CPU,
-    #        torch.profiler.ProfilerActivity.CUDA,
-    #    ],
-    #    schedule=torch.profiler.schedule(wait=1, warmup=2, active=3, repeat=1),
-    #    on_trace_ready=torch.profiler.tensorboard_trace_handler(
-    #        "fsdp_a100/profile_traces/rebased_pr_no_sync"
-    #    ),
-    #    profile_memory=True,
-    #    with_stack=False,
-    #    record_shapes=True,
-    #) as torch_profiler:
+    with torch.profiler.profile(
+        activities=[
+            torch.profiler.ProfilerActivity.CPU,
+            torch.profiler.ProfilerActivity.CUDA,
+        ],
+        schedule=torch.profiler.schedule(wait=1, warmup=2, active=5, repeat=1),
+        on_trace_ready=torch.profiler.tensorboard_trace_handler(
+             "fsdp_a100/for_presentation/profile_traces/gg_2"
+        ),
+        profile_memory=True,
+        with_stack=False,
+        record_shapes=True,
+    ) as torch_profiler:
 
-    if rank == 0 and cfg.track_memory:
-        fn = cfg.model_name + "memory_tracking.txt"
-        mem_alloc_tracker = []
-        mem_reserved_tracker = []
+        if rank == 0 and cfg.track_memory:
+            fn = cfg.model_name + "memory_tracking.txt"
+            mem_alloc_tracker = []
+            mem_reserved_tracker = []
 
-    for epoch in range(1, epochs + 1):
-        if rank == 0:
-            print(f"\n--> Starting Epoch {epoch}")
+        for epoch in range(1, epochs + 1):
+            if rank == 0:
+                print(f"\n--> Starting Epoch {epoch}")
 
-            t0 = time.time()
-        train_accuracy = train(
-            args,
-            model,
-            local_rank,
-            rank,
-            world_size,
-            train_loader,
-            optimizer,
-            epoch,
-            sampler=sampler1,
-            profiler=torch_profiler,
-        )
-
-        if cfg.run_validation:
-            curr_val_loss = validation(model, local_rank, rank, world_size, test_loader)
-
-        #scheduler.step()
-
-        if rank == 0:
-            print(f"--> epoch {epoch} completed...entering save and stats zone")
-
-            dur.append(time.time() - t0)
-            train_acc_tracking.append(train_accuracy.item())
+                t0 = time.time()
+            train_accuracy = train(
+                args,
+                model,
+                local_rank,
+                rank,
+                world_size,
+                train_loader,
+                optimizer,
+                epoch,
+                sampler=sampler1,
+                profiler=torch_profiler,
+            )
 
             if cfg.run_validation:
-                val_acc_tracking.append(curr_val_loss.item())
+                curr_val_loss = validation(model, local_rank, rank, world_size, test_loader)
 
-            if cfg.track_memory:
-                mem_alloc_tracker.append(
-                    format_metrics_to_gb(torch.cuda.memory_allocated())
-                )
-                mem_reserved_tracker.append(
-                    format_metrics_to_gb(torch.cuda.memory_reserved())
-                )
+                #scheduler.step()
 
-        if cfg.save_model and curr_val_loss < best_val_loss:
+            if rank == 0:
+                print(f"--> epoch {epoch} completed...entering save and stats zone")
+
+                dur.append(time.time() - t0)
+                train_acc_tracking.append(train_accuracy.item())
+
+                if cfg.run_validation:
+                    val_acc_tracking.append(curr_val_loss.item())
+
+                if cfg.track_memory:
+                    mem_alloc_tracker.append(
+                        format_metrics_to_gb(torch.cuda.memory_allocated())
+                    )
+                    mem_reserved_tracker.append(
+                        format_metrics_to_gb(torch.cuda.memory_reserved())
+                    )
+
+            if cfg.save_model and curr_val_loss < best_val_loss:
                 # update curr best val accuracy
 
-                # save
-            if rank == 0:
-                print(f"--> entering save model state...")
-            save_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
-            with FSDP.state_dict_type(
-                model, StateDictType.FULL_STATE_DICT, save_policy
-            ):
-                cpu_state = model.state_dict()
-                # states = model.state_dict()
-            print(f"saving process: rank {rank}  done w state_dict")
+                    # save
+                if rank == 0:
+                    print(f"--> entering save model state...")
+                save_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
+                with FSDP.state_dict_type(
+                    model, StateDictType.FULL_STATE_DICT, save_policy
+                ):
+                    cpu_state = model.state_dict()
+                    # states = model.state_dict()
+                print(f"saving process: rank {rank}  done w state_dict")
 
-            if rank == 0:
-                print(f"--> saving model ...")
-                currEpoch = (
-                    "-" + str(epoch) + "-" + str(round(curr_val_loss.item(), 4)) + ".pt"
-                )
-                save_name = file_save_name + "-" + time_of_run + "-" + currEpoch
+                if rank == 0:
+                    print(f"--> saving model ...")
+                    currEpoch = (
+                        "-" + str(epoch) + "-" + str(round(curr_val_loss.item(), 4)) + ".pt"
+                    )
+                    save_name = file_save_name + "-" + time_of_run + "-" + currEpoch
 
-                torch.save(cpu_state, save_name)
+                    torch.save(cpu_state, save_name)
 
-                print(f"--> saved {save_name} to disk")
+                    print(f"--> saved {save_name} to disk")
 
-                dq.append(save_name)
+                    dq.append(save_name)
 
-                # only keep a rolling number of model files to avoid excessive disk space use
-                model_checkpoints.prune_checkpoints(rank, dq, cfg)
+                    # only keep a rolling number of model files to avoid excessive disk space use
+                    model_checkpoints.prune_checkpoints(rank, dq, cfg)
 
-        # announce new val loss record:
-        if rank == 0 and curr_val_loss < best_val_loss:
+            # announce new val loss record:
+            if rank == 0 and curr_val_loss < best_val_loss:
 
-            best_val_loss = curr_val_loss
-            print(f"-->>>> New Val Loss Record: {best_val_loss}")
-
+                best_val_loss = curr_val_loss
+                print(f"-->>>> New Val Loss Record: {best_val_loss}")
 
 
     # init_end_event.record()
